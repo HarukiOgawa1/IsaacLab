@@ -386,3 +386,53 @@ G1_MINIMAL_CFG.spawn.usd_path = f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree/G1/g1_mi
 
 This configuration removes most collision meshes to speed up simulation.
 """
+
+RDCLab_bipedal_robot_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=f"/workspace/isaaclab/source/isaaclab_assets/data/RDCLab/simple_model.usd",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, -0.07),
+        joint_pos={
+            ".*r_waist_roll"    :0.0,
+            ".*r_waist_pitch"   :-0.6,
+            ".*r_knee_pitch"    :1.3,
+            ".*l_waist_roll"    :0.0,
+            ".*l_waist_pitch"   :-0.6,
+            ".*l_knee_pitch"    :1.3,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*r_waist_roll",
+                ".*r_waist_pitch",
+                ".*r_knee_pitch",
+                ".*l_waist_roll",
+                ".*l_waist_pitch",
+                ".*l_knee_pitch",
+            ],
+            effort_limit=13.0,
+            velocity_limit=10.0,
+            stiffness=20.0,
+            damping=0.16,
+            armature=0.01,
+        ),
+    },
+)
+"""Configuration for the RDCLab bipedal robot."""
