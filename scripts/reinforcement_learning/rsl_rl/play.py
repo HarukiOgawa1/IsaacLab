@@ -1,24 +1,9 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 """Script to play a checkpoint if an RL agent from RSL-RL."""
-
-import platform
-from importlib.metadata import version
-
-if version("rsl-rl-lib") != "2.3.0":
-    if platform.system() == "Windows":
-        cmd = [r".\isaaclab.bat", "-p", "-m", "pip", "install", "rsl-rl-lib==2.3.0"]
-    else:
-        cmd = ["./isaaclab.sh", "-p", "-m", "pip", "install", "rsl-rl-lib==2.3.0"]
-    print(
-        f"Please install the correct version of RSL-RL.\nExisting version is: '{version('rsl-rl-lib')}'"
-        " and required version is: '2.3.0'.\nTo install the correct version, run:"
-        f"\n\n\t{' '.join(cmd)}\n"
-    )
-    exit(1)
 
 """Launch Isaac Sim Simulator first."""
 
@@ -81,18 +66,19 @@ from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 
 def main():
     """Play with RSL-RL agent."""
+    task_name = args_cli.task.split(":")[-1]
     # parse configuration
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
-    agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(task_name, args_cli)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
+        resume_path = get_published_pretrained_checkpoint("rsl_rl", task_name)
         if not resume_path:
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
             return
@@ -133,11 +119,20 @@ def main():
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
+    # extract the neural network module
+    # we do this in a try-except to maintain backwards compatibility.
+    try:
+        # version 2.3 onwards
+        policy_nn = ppo_runner.alg.policy
+    except AttributeError:
+        # version 2.2 and below
+        policy_nn = ppo_runner.alg.actor_critic
+
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(ppo_runner.alg.policy, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
+    export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
     export_policy_as_onnx(
-        ppo_runner.alg.policy, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
+        policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
     )
 
     dt = env.unwrapped.step_dt
