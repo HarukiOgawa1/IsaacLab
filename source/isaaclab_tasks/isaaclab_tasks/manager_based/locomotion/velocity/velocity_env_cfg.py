@@ -71,7 +71,26 @@ class MySceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
+    
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    
+    contact_forces_LF = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link", # 左足のリンク名
+        update_period=0.0,
+        history_length=3,
+        debug_vis=True,
+        track_air_time=True,
+        filter_prim_paths_expr=["/World/ground"],
+    )
+    contact_forces_RF = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link", # 右足のリンク名
+        update_period=0.0,
+        history_length=3,
+        debug_vis=True,
+        track_air_time=True,
+        filter_prim_paths_expr=["/World/ground"],
+    )
+
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -318,6 +337,11 @@ class LocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
             self.scene.height_scanner.update_period = self.decimation * self.sim.dt
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
+        # Set the update interval for the added sensor
+        if self.scene.contact_forces_LF is not None:
+            self.scene.contact_forces_LF.update_period = self.sim.dt
+        if self.scene.contact_forces_RF is not None:
+            self.scene.contact_forces_RF.update_period = self.sim.dt
 
         # check if terrain levels curriculum is enabled - if so, enable curriculum for terrain generator
         # this generates terrains with increasing difficulty and is useful for training

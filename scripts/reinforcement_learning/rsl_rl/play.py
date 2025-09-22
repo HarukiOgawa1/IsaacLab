@@ -172,6 +172,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+
+            # センサーデータを取得して表示
+            # env.unwrappedでラップされた元の環境にアクセス
+            scene = env.unwrapped.scene
+            # 左足の接触力を取得 (最初の環境のみ表示)
+            contact_force_lf = scene["contact_forces_LF"].data.net_forces_w[0]
+            # 右足の接触力を取得 (最初の環境のみ表示)
+            contact_force_rf = scene["contact_forces_RF"].data.net_forces_w[0]
+
+            # 接触力のノルム（大きさ）を計算
+            force_norm_lf = torch.linalg.norm(contact_force_lf)
+            force_norm_rf = torch.linalg.norm(contact_force_rf)
+
+            # コンソールに出力 (見やすいようにフォーマット)
+            print(
+                f"Contact Forces | Left Foot: {force_norm_lf:8.2f} N, "
+                f"Right Foot: {force_norm_rf:8.2f} N"
+            )
+            
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
