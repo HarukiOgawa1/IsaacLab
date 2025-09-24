@@ -57,6 +57,7 @@ import gymnasium as gym
 import os
 import time
 import torch
+import csv
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -163,6 +164,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs, _ = env.get_observations()
     timestep = 0
+
+    # CSVファイルを開き、書き込み準備
+    csv_filename = "contact_forces.csv"
+    try:
+        csv_file = open(csv_filename, "w", newline="", encoding="utf-8")
+        csv_writer = csv.writer(csv_file)
+        # ヘッダーを書き込む
+        csv_writer.writerow(["Timestep", "Left_Foot_Force_N", "Right_Foot_Force_N"])
+        print(f"[INFO] Opened {csv_filename} for writing contact force data.")
+    except IOError as e:
+        print(f"[ERROR] Failed to open {csv_filename} for writing: {e}")
+        # ファイルが開けなかった場合は、書き込み処理をスキップするためにNoneを設定
+        csv_writer = None
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -185,22 +200,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             force_norm_lf = torch.linalg.norm(contact_force_lf)
             force_norm_rf = torch.linalg.norm(contact_force_rf)
 
-            # コンソールに出力 (見やすいようにフォーマット)
             print(
                 f"Contact Forces | Left Foot: {force_norm_lf:8.2f} N, "
                 f"Right Foot: {force_norm_rf:8.2f} N"
             )
+
+            # データをCSVファイルに書き込む
+            if csv_writer is not None:
+                # .item() を使ってTensorからPythonの数値に変換
+                csv_writer.writerow([timestep, force_norm_lf.item(), force_norm_rf.item()])
             
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+            if timestep >= args_cli.video_length:
                 break
+
+        #if args_cli.video:
+        #    timestep += 1
+        #    # Exit the play loop after recording one video
+        #    if timestep == args_cli.video_length:
+        #        break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # シミュレーション終了後にファイルを閉じる
+    if 'csv_file' in locals() and not csv_file.closed:
+        csv_file.close()
+        print(f"[INFO] Contact force data saved to {csv_filename}")
 
     # close the simulator
     env.close()
