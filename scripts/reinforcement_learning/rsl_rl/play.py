@@ -143,6 +143,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
+    # ロボットオブジェクトを取得し、足首リンクのボディインデックスを見つける
+    robot = env.unwrapped.scene["robot"]
+    body_names = robot.body_names
+    # リンク名がUSDファイルで定義されているものと一致しているか確認してください
+    left_ankle_idx = body_names.index("left_ankle_roll_link")
+    right_ankle_idx = body_names.index("right_ankle_roll_link")
+    print(f"[INFO] Found ankle link indices: Left='{left_ankle_idx}', Right='{right_ankle_idx}'")
+
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
     try:
@@ -171,7 +179,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         csv_file = open(csv_filename, "w", newline="", encoding="utf-8")
         csv_writer = csv.writer(csv_file)
         # ヘッダーを書き込む
-        csv_writer.writerow(["Timestep", "Left_Foot_Force_N", "Right_Foot_Force_N", "CoM_X", "CoM_Y", "CoM_Z"])
+        csv_writer.writerow(["Timestep", "Left_Foot_Force_N", "Right_Foot_Force_N", "CoM_X", "CoM_Y", "CoM_Z", "Left_Foot_Height_Z", "Right_Foot_Height_Z"])
         print(f"[INFO] Opened {csv_filename} for writing contact force data.")
     except IOError as e:
         print(f"[ERROR] Failed to open {csv_filename} for writing: {e}")
@@ -198,6 +206,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # ベースリンクの位置をCoMとして取得 (ワールド座標系)
             com_position = robot_data.root_pos_w[0]
 
+            # 全てのボディの位置を取得
+            all_body_positions = robot_data.body_pos_w[0]
+            # インデックスを使って足首リンクのZ座標（高さ）を取得
+            left_foot_height = all_body_positions[left_ankle_idx][2]
+            right_foot_height = all_body_positions[right_ankle_idx][2]
+
             # 左足の接触力を取得 (最初の環境のみ表示)
             contact_force_lf = scene["contact_forces_LF"].data.net_forces_w[0]
             # 右足の接触力を取得 (最初の環境のみ表示)
@@ -212,9 +226,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             #    f"Right Foot: {force_norm_rf:8.2f} N"
             #)
             print(
-                f"T: {timestep:4} | "
-                f"CoM (X,Y,Z): {com_position[0]:6.2f}, {com_position[1]:6.2f}, {com_position[2]:6.2f} | "
-                f"Forces (L,R): {force_norm_lf:7.2f} N, {force_norm_rf:7.2f} N"
+            f"T: {timestep:4} | "
+            f"CoM (X,Y,Z): {com_position[0]:6.2f}, {com_position[1]:6.2f}, {com_position[2]:6.2f} | "
+            f"Foot Height (L,R): {left_foot_height:5.3f}, {right_foot_height:5.3f} | "
+            f"Forces (L,R): {force_norm_lf:7.2f} N, {force_norm_rf:7.2f} N"
             )
 
             # データをCSVファイルに書き込む
@@ -225,12 +240,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if csv_writer is not None:
             # .item() を使ってTensorからPythonの数値に変換
                 csv_writer.writerow([
-                    timestep,
-                    force_norm_lf.item(),
-                    force_norm_rf.item(),
-                    com_position[0].item(),
-                    com_position[1].item(),
-                    com_position[2].item()
+                timestep,
+                force_norm_lf.item(),
+                force_norm_rf.item(),
+                com_position[0].item(),
+                com_position[1].item(),
+                com_position[2].item(),
+                left_foot_height.item(),
+                right_foot_height.item()
             ])
             
         timestep += 1
