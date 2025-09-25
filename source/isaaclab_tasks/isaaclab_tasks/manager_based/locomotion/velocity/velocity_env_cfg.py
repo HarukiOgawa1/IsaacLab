@@ -337,7 +337,7 @@ class LocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
             self.scene.height_scanner.update_period = self.decimation * self.sim.dt
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
-        # Set the update interval for the added sensor
+        # set the update interval for the added sensor
         if self.scene.contact_forces_LF is not None:
             self.scene.contact_forces_LF.update_period = self.sim.dt
         if self.scene.contact_forces_RF is not None:
