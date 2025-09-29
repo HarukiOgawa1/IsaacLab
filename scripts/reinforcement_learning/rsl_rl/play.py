@@ -193,7 +193,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         csv_file = open(csv_filename, "w", newline="", encoding="utf-8")
         csv_writer = csv.writer(csv_file)
         # ヘッダーを書き込む
-        csv_writer.writerow(["Timestep", "Left_Foot_Force_N", "Right_Foot_Force_N", "CoM_X", "CoM_Y", "CoM_Z", "Left_Foot_Height_Z", "Right_Foot_Height_Z"])
+        #csv_writer.writerow(["Timestep", "Left_Foot_Force_N", "Right_Foot_Force_N", "CoM_X", "CoM_Y", "CoM_Z", "Left_Foot_Height_Z", "Right_Foot_Height_Z"])
+        csv_writer.writerow([
+            "Timestep",
+            "CoM_X", "CoM_Y", "CoM_Z",
+            "Left_Ankle_X", "Left_Ankle_Y", "Left_Ankle_Z",
+            "Right_Ankle_X", "Right_Ankle_Y", "Right_Ankle_Z"
+        ])
         print(f"[INFO] Opened {csv_filename} for writing contact force data.")
     except IOError as e:
         print(f"[ERROR] Failed to open {csv_filename} for writing: {e}")
@@ -226,6 +232,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             left_foot_height = all_body_positions[left_ankle_idx][2]
             right_foot_height = all_body_positions[right_ankle_idx][2]
 
+            left_ankle_position = all_body_positions[left_ankle_idx]
+            right_ankle_position = all_body_positions[right_ankle_idx]
+
             # 左足の接触力を取得 (最初の環境のみ表示)
             contact_force_lf = scene["contact_forces_LF"].data.net_forces_w[0]
             # 右足の接触力を取得 (最初の環境のみ表示)
@@ -235,16 +244,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             force_norm_lf = torch.linalg.norm(contact_force_lf)
             force_norm_rf = torch.linalg.norm(contact_force_rf)
 
-            #print(
-            #    f"Contact Forces | Left Foot: {force_norm_lf:8.2f} N, "
-            #    f"Right Foot: {force_norm_rf:8.2f} N"
-            #)
             print(
-            f"T: {timestep:4} | "
-            f"CoM (X,Y,Z): {com_position[0]:6.2f}, {com_position[1]:6.2f}, {com_position[2]:6.2f} | "
-            f"Foot Height (L,R): {left_foot_height:5.3f}, {right_foot_height:5.3f} | "
-            f"Forces (L,R): {force_norm_lf:7.2f} N, {force_norm_rf:7.2f} N"
+                f"T: {timestep:4} | "
+                f"CoM (X,Y,Z): {com_position[0]:.2f}, {com_position[1]:.2f}, {com_position[2]:.2f} | "
+                f"L Ankle (X,Y,Z): {left_ankle_position[0]:.2f}, {left_ankle_position[1]:.2f}, {left_ankle_position[2]:.2f} | "
+                f"R Ankle (X,Y,Z): {right_ankle_position[0]:.2f}, {right_ankle_position[1]:.2f}, {right_ankle_position[2]:.2f}"
             )
+
+            #print(
+            #f"T: {timestep:4} | "
+            #f"CoM (X,Y,Z): {com_position[0]:6.2f}, {com_position[1]:6.2f}, {com_position[2]:6.2f} | "
+            #f"Foot Height (L,R): {left_foot_height:5.3f}, {right_foot_height:5.3f} | "
+            #f"Forces (L,R): {force_norm_lf:7.2f} N, {force_norm_rf:7.2f} N"
+            #)
 
             # データをCSVファイルに書き込む
             #if csv_writer is not None:
@@ -252,17 +264,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             #    csv_writer.writerow([timestep, force_norm_lf.item(), force_norm_rf.item()])
 
             if csv_writer is not None:
-            # .item() を使ってTensorからPythonの数値に変換
+                # .item() を使ってTensorからPythonの数値に変換
                 csv_writer.writerow([
-                timestep,
-                force_norm_lf.item(),
-                force_norm_rf.item(),
-                com_position[0].item(),
-                com_position[1].item(),
-                com_position[2].item(),
-                left_foot_height.item(),
-                right_foot_height.item()
-            ])
+                    timestep,
+                    com_position[0].item(),
+                    com_position[1].item(),
+                    com_position[2].item(),
+                    left_ankle_position[0].item(),
+                    left_ankle_position[1].item(),
+                    left_ankle_position[2].item(),
+                    right_ankle_position[0].item(),
+                    right_ankle_position[1].item(),
+                    right_ankle_position[2].item(),
+                ])
             
         timestep += 1
         if args_cli.video:
