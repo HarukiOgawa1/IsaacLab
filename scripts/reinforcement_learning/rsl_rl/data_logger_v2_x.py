@@ -98,14 +98,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ---------------------------------------------------------
     # リセット設定 (10m歩くまで止めない)
     # ---------------------------------------------------------
-    env_cfg.episode_length_s = 60.0  # タイムアウトを防ぐために長めに設定
+    env_cfg.episode_length_s = 30.0  # タイムアウトを防ぐ
     if hasattr(env_cfg, "terminations"):
         env_cfg.terminations = None    # 転倒等によるリセットを無効化
         print("[INFO] Terminations disabled for continuous data collection.")
 
     # 初期コマンド設定 (X=1.0m/s, Y=0, Rot=0)
-    # ※ ロボット座標系でのX方向（前方）への移動指示です。
-    #    今回ロボット自体をY軸に向けるため、このコマンドでY軸方向に進みます。
     if hasattr(env_cfg, "commands") and hasattr(env_cfg.commands, "base_velocity"):
         env_cfg.commands.base_velocity.ranges.lin_vel_x = (1.0, 1.0)
         env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
@@ -158,9 +156,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # =========================================================================
-    # カメラ位置の設定 (初期)
+    # カメラ位置の設定
     # =========================================================================
-    env.unwrapped.sim.set_camera_view(eye=[5.0, 5.0, 5.0], target=[0.0, 0.0, 0.0])
+    env.unwrapped.sim.set_camera_view(eye=[1.8, -3.5, 1.2], target=[1.8, 0.0, 0.6])
     # =========================================================================
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
@@ -267,60 +265,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dt = env.unwrapped.step_dt
 
     # ---------------------------------------------------------
-    # 初期化と (START_X, START_Y) へのリセット
+    # 初期化と (0,0) へのリセット
     # ---------------------------------------------------------
     obs = env.get_observations()
     
-    # ロボットの位置と向きをリセット
-    # Y軸に沿って歩くため、Yawを90度 (左) に回転させます
-    print("[INFO] Forcing robot to start aligned with Y-axis...")
+    # ロボットの位置を強制的に (0, 0) スタートにする
+    print("[INFO] Forcing robot to start at (0, 0) facing forward...")
     
-    # デフォルト状態を取得
     root_state = robot.data.default_root_state.clone()
-    
-    # 設定したいスタート座標 (X, Y)
-    # ※ Y軸方向に進むため、スタート地点を考慮してください。
-    #    (0,0)から +Y方向 (階段や坂がある方向) へ進む設定にします。
-    START_X = 4.0
-    START_Y = -56.0 # スタート地点 (ここから +10m 進む)
-
-    # 位置のリセット
-    root_state[:, 0] = START_X
-    root_state[:, 1] = START_Y
-    
-    # 向きのリセット (Yaw = 90度 -> Y軸正方向を向く)
-    # Quaternion [w, x, y, z]
-    # cos(45deg) = 0.7071068, sin(45deg) = 0.7071068
-    root_state[:, 3] = 0.7071068 
-    root_state[:, 4] = 0.0
-    root_state[:, 5] = 0.0
-    root_state[:, 6] = 0.7071068
+    root_state[:, :2] = 0.0 
+    root_state[:, 3] = 1.0 
+    root_state[:, 4:] = 0.0 
     
     # シミュレーションに反映
     robot.write_root_state_to_sim(root_state)
     robot.reset()
     scene.reset() 
 
-    # カメラ位置をY軸進行方向が見えるように更新
-    env.unwrapped.sim.set_camera_view(eye=[START_X + 6.0, START_Y + 4.0, 5.0], target=[START_X - 1.0, START_Y + 4.0, 1.0])
-    print(f"[INFO] Camera view updated for Y-axis walking.")
-
-    # start_pos変数の更新
-    start_pos = torch.tensor([START_X, START_Y, 0.0], device=env.unwrapped.device)
+    start_pos = torch.tensor([0.0, 0.0, 0.0], device=env.unwrapped.device)
 
     timestep = 0
     sim_time = 0.0
     distance_traveled = 0.0
     
-    target_distance = 8.0 # 10m進むまで
+    target_distance = 10.0 # 10m進むまで
 
     # エネルギー計算用
     total_energy = 0.0
     measurement_time = 0.0
     measurement_started = False
-    
-    # 【変更】Y軸計測用の開始変数
-    start_measure_y = 0.0
+    start_measure_x = 0.0
 
     # ---------------------------------------------------------
     # CSVファイル設定
@@ -375,7 +349,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         joint_torques_log = []
         joint_vels_log = []
 
-        # 安定性解析用リスト
+        # [追加] 安定性解析用リスト
         traj_roll = []
         traj_pitch = []
 
@@ -385,17 +359,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             vel_command_term = None
             print("[WARNING] Could not access 'base_velocity' term. Dynamic heading correction disabled.")
 
-        print(f"[INFO] Starting simulation... Y-axis target {target_distance}m.")
+        print(f"[INFO] Starting simulation... 0m/s for 1s, then target {target_distance}m.")
         
         while simulation_app.is_running():
             start_time = time.time()
             
             # コマンド制御: 1秒待機 -> 移動開始 & 補正
-            cmd_x = 0.0 
+            cmd_x = 0.0 # ループ冒頭で初期化
             
             if vel_command_term is not None:
-                # デフォルト: 移動コマンド (ロボット座標系 X=1.0)
-                # ロボットはY軸を向いているため、これでY軸方向に進みます
+                # デフォルト: 移動コマンド (X=1.0)
                 cmd_x = 1.0
                 cmd_y = 0.0
                 cmd_yaw = 0.0
@@ -422,13 +395,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # 現在位置の取得
                     current_root_pos = robot.data.root_pos_w[0]
                     current_x_val = current_root_pos[0].item()
-                    current_y_val = current_root_pos[1].item() # Y座標が主役
 
-                    # 計測開始時の初期位置を保存 (Y座標を基準)
+                    # 計測開始時の初期位置を保存
                     if not measurement_started:
                         print(f"[INFO] Command is {cmd_x} m/s. Measurement STARTED at time {sim_time:.2f}s")
                         measurement_started = True
-                        start_measure_y = current_y_val
+                        start_measure_x = current_x_val
 
                     # --- データ取得 ---
                     com_pos = current_root_pos
@@ -463,7 +435,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     current_torques = [all_torques[idx].item() for idx in target_joint_indices]
                     current_vels = [all_vels[idx].item() for idx in target_joint_indices]
 
-                    # 姿勢の計算 (Roll, Pitch)
+                    # --- [追加] 姿勢の計算 (Roll, Pitch) ---
+                    # マスユーティリティ用に次元を追加 (Batch dim)
                     root_quat_batch = root_quat.unsqueeze(0)
                     r, p, y = math_utils.euler_xyz_from_quat(root_quat_batch)
                     
@@ -471,6 +444,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     pitch_deg = torch.rad2deg(p).item()
 
                     # --- CSV書き込み ---
+                    # CSV上でも、グラフ描画時と合わせるため、右足をマイナスにして保存します
                     w_forces.writerow([timestep, l_force_val, -r_force_val])
                     
                     w_foot_z.writerow([timestep, l_foot_pos_vec[2].item(), r_foot_pos_vec[2].item()])
@@ -488,29 +462,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     vel_log_target.append([target_vel_x, target_vel_y, target_ang_z])
                     vel_log_actual.append([actual_vel_x, actual_vel_y, actual_ang_z])
                     
+                    # 関節データの保存
                     joint_torques_log.append(current_torques)
                     joint_vels_log.append(current_vels)
 
+                    # [追加] 姿勢データの保存
                     traj_roll.append(roll_deg)
                     traj_pitch.append(pitch_deg)
 
-                    # 【修正】Y軸距離での終了判定
-                    measured_dist_now = current_y_val - start_measure_y
-                    distance_traveled = current_y_val # 記録用
+                    # 相対距離での終了判定
+                    measured_dist_now = current_x_val - start_measure_x
+                    distance_traveled = current_x_val
 
-                    # 終了条件1: Y軸方向に目標距離 (10m) 到達
+                    # Y軸の位置を取得
+                    current_y_val = current_root_pos[1].item()
+
+                    # 終了条件1: X軸方向に目標距離 (10m) 到達
                     if measured_dist_now >= target_distance:
-                        print(f"[INFO] Measured distance (Y) {measured_dist_now:.4f}m (Target {target_distance}m) reached. Stopping.")
+                        print(f"[INFO] Measured distance {measured_dist_now:.4f}m (Target {target_distance}m) reached. Stopping.")
                         break
 
-                    # 終了条件2: X軸方向に ±5m 以上逸脱 (横ずれ判定)
-                    # 今回はX軸が横方向になります
-                    if abs(current_x_val - START_X) > 5.0:
-                        print(f"[INFO] Lateral deviation (X) {current_x_val:.4f}m (Start {START_X}m) exceeds limit ±3.0m. Stopping.")
+                    # 終了条件2: Y軸方向に ±3m 以上逸脱
+                    if abs(current_y_val) > 3.0:
+                        print(f"[INFO] Lateral deviation {current_y_val:.4f}m exceeds limit ±3.0m. Stopping.")
                         break
 
-                    # 終了条件3: 計測時間 30秒 経過
-                    if measurement_time >= 30.0:
+                    # 終了条件3: 計測時間 20秒 経過 (追加)
+                    if measurement_time >= 20.0:
                         print(f"[INFO] Measurement time limit {measurement_time:.2f}s reached. Stopping.")
                         break
 
@@ -535,7 +513,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ---------------------------------------------------------
     # メトリクス計算とレポート保存
     # ---------------------------------------------------------
-    measured_distance = distance_traveled - start_measure_y
+    measured_distance = distance_traveled - start_measure_x
     
     if measured_distance > 0:
         cot = total_energy / (robot_mass * gravity * measured_distance)
@@ -546,7 +524,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     report_str = (
         f"========================================\n"
-        f"METRICS REPORT (Y-Axis Measurement)\n"
+        f"METRICS REPORT (Measurement Phase Only)\n"
         f"Meas. Dist:   {measured_distance:.4f} m\n"
         f"Meas. Time:   {measurement_time:.2f} s\n"
         f"Total Energy: {total_energy:.2f} J\n"
@@ -568,28 +546,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         writer.writerow([measured_distance, measurement_time, total_energy, avg_power, cot])
 
     print(f"[INFO] Metrics report saved to: {report_file_path}")
+    print(f"[INFO] Metrics summary CSV saved to: {summary_csv_path}")
 
     # ---------------------------------------------------------
-    # グラフ生成処理
+    # グラフ生成処理 (更新版)
     # ---------------------------------------------------------
     if len(vel_log_target) > 0:
-        plt.rcParams.update({'font.size': 14})
+        # フォントサイズを大きく設定
+        plt.rcParams.update({'font.size': 15})
 
         # =========================================================
         # [USER SETTINGS] グラフ設定
         # =========================================================
-        Y_LIM_TORQUE = 100.0   
-        Y_LIM_VEL = 20.0       
+        Y_LIM_TORQUE = 100.0   # トルク Y軸範囲 (+/- Nm)
+        Y_LIM_VEL = 20.0       # 速度 Y軸範囲 (+/- rad/s)
         
-        DISPLAY_TASK_NAME = "dof_torques_l2" 
+        # グラフタイトルに使われるタスク名 (Noneの場合は自動取得)
+        DISPLAY_TASK_NAME = "Track Lin Vel XY" 
+        # ↑ ここを変更するとグラフのタイトル名が変わります
+        
+        # グラフタイトルに使われるWeight値 (任意に変更可能)
+        #DISPLAY_WEIGHT = 5.0
         DISPLAY_WEIGHT = args_cli.display_weight
+        # ↑ ここを変更するとタイトルのWeight値が変わります
         # =========================================================
 
+        # タスク名の決定
         if DISPLAY_TASK_NAME is None:
             plot_task_name = task_name
         else:
             plot_task_name = DISPLAY_TASK_NAME
             
+        # タイトルプレフィックスの作成 (共通部分)
         title_prefix = f"Reward : {plot_task_name}, Weight : {DISPLAY_WEIGHT}"
 
         vel_log_target = np.array(vel_log_target)
@@ -600,16 +588,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         forces_l_arr = np.array(forces_log_l)
         forces_r_arr = np.array(forces_log_r)
         
+        # 関節データの配列化 (Timesteps x NumJoints)
         joint_torques_arr = np.array(joint_torques_log)
         joint_vels_arr = np.array(joint_vels_log)
 
+        # 時間軸の生成
         time_axis = np.arange(len(vel_log_target)) * dt
 
         # ---------------------------------------------------------
-        # 1. 速度追従グラフ (変更なし: ロボットから見れば前方Xなので)
+        # 速度追従グラフ
         # ---------------------------------------------------------
         fig_vel, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-        axs[0].set_title(f"{title_prefix}, Velocity_Tracking")
+        
+        # タイトルを設定
+        axs[0].set_title(f"{title_prefix}, Velocity Tracking")
+        
         axs[0].plot(time_axis, vel_log_target[:, 0], 'r--', label="Target", linewidth=2.5)
         axs[0].plot(time_axis, vel_log_actual[:, 0], 'b', alpha=0.7, label="Actual", linewidth=2.5)
         axs[0].set_ylabel("Vel X [m/s]")
@@ -625,7 +618,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         axs[2].plot(time_axis, vel_log_target[:, 2], 'r--', label="Target", linewidth=2.5)
         axs[2].plot(time_axis, vel_log_actual[:, 2], 'b', alpha=0.7, label="Actual", linewidth=2.5)
         axs[2].set_ylabel("Ang Vel Z [rad/s]")
-        axs[2].set_xlabel("Time [s]")
+        axs[2].set_xlabel("Time [s]") # 横軸ラベル追加
         axs[2].grid(True)
         axs[2].set_ylim(-1.0, 1.0)
 
@@ -634,77 +627,147 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         plt.close(fig_vel)
 
         # ---------------------------------------------------------
-        # 関節グラフ (変更なし)
+        # 関節トルク・速度のグラフ化 (Left/Right x Torque/Velocity)
         # ---------------------------------------------------------
+        # target_joint_names = left_joint_names (0-5) + right_joint_names (6-11)
         num_left_joints = len(left_joint_names)
         num_right_joints = len(right_joint_names)
 
         def plot_joint_group(data, start_idx, end_idx, joint_names, suffix, title, filename, y_limit=None, y_label_text=""):
+            """
+            関節グループごとのグラフを作成するヘルパー関数
+            """
             fig, ax = plt.subplots(figsize=(12, 7))
+            
+            # 線の色を区別するためのカラーマップ
             colors = ['#FF4500', '#007FFF', '#009E73', '#56B4E9', '#E69F00', '#F0E442'] 
+            
             for i, name in enumerate(joint_names):
                 col_idx = start_idx + i
                 if col_idx < data.shape[1]:
+                    # ラベルの作成 (例: left_hip_pitch_joint_Torque)
                     label_name = f"{name}_{suffix}"
+                    # データプロット (線を太く維持: linewidth=3.0)
                     ax.plot(time_axis, data[:, col_idx], label=label_name, linewidth=3.0, color=colors[i % len(colors)])
+
             ax.set_title(title)
+            
+            # --- 軸ラベルの設定 (追加) ---
             ax.set_xlabel("Time [s]")
             ax.set_ylabel(y_label_text)
+            # ---------------------------
+
             ax.grid(True, linestyle='-', alpha=0.6)
+            
+            # Y軸の範囲を固定設定
             if y_limit is not None:
                 ax.set_ylim(-y_limit, y_limit)
+
+            # 凡例を下に配置
             ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.25), ncol=3, frameon=False)
             plt.tight_layout()
-            plt.subplots_adjust(bottom=0.2)
+            plt.subplots_adjust(bottom=0.2) # 凡例スペース確保
             plt.savefig(os.path.join(log_dir, filename))
             plt.close(fig)
+            print(f"[INFO] Saved graph: {filename}")
 
-        plot_joint_group(joint_vels_arr, num_left_joints, num_left_joints + num_right_joints, right_joint_names, "Vel", f"{title_prefix}, Right_Velocity", "Right_Velocity.png", Y_LIM_VEL, "Velocity [rad/s]")
-        plot_joint_group(joint_torques_arr, 0, num_left_joints, left_joint_names, "Torque", f"{title_prefix}, Left_Torques", "Left_Torques.png", Y_LIM_TORQUE, "Torque [Nm]")
-        plot_joint_group(joint_torques_arr, num_left_joints, num_left_joints + num_right_joints, right_joint_names, "Torque", f"{title_prefix}, Right_Torques", "Right_Torques.png", Y_LIM_TORQUE, "Torque [Nm]")
-        plot_joint_group(joint_vels_arr, 0, num_left_joints, left_joint_names, "Vel", f"{title_prefix}, Left_Velocity", "Left_Velocity.png", Y_LIM_VEL, "Velocity [rad/s]")
+        # 1. Right_Velocity.png
+        plot_joint_group(
+            data=joint_vels_arr,
+            start_idx=num_left_joints,
+            end_idx=num_left_joints + num_right_joints,
+            joint_names=right_joint_names,
+            suffix="Vel",
+            title=f"{title_prefix}, Right Velocity",
+            filename="Right_Velocity.png",
+            y_limit=Y_LIM_VEL,
+            y_label_text="Velocity [rad/s]"
+        )
+
+        # 2. Left_Torques.png
+        plot_joint_group(
+            data=joint_torques_arr,
+            start_idx=0,
+            end_idx=num_left_joints,
+            joint_names=left_joint_names,
+            suffix="Torque",
+            title=f"{title_prefix}, Left Torques",
+            filename="Left_Torques.png",
+            y_limit=Y_LIM_TORQUE,
+            y_label_text="Torque [Nm]"
+        )
+
+        # 3. Right_Torques.png
+        plot_joint_group(
+            data=joint_torques_arr,
+            start_idx=num_left_joints,
+            end_idx=num_left_joints + num_right_joints,
+            joint_names=right_joint_names,
+            suffix="Torque",
+            title=f"{title_prefix}, Right Torques",
+            filename="Right_Torques.png",
+            y_limit=Y_LIM_TORQUE,
+            y_label_text="Torque [Nm]"
+        )
+
+        # 4. Left_Velocity.png
+        plot_joint_group(
+            data=joint_vels_arr,
+            start_idx=0,
+            end_idx=num_left_joints,
+            joint_names=left_joint_names,
+            suffix="Vel",
+            title=f"{title_prefix}, Left Velocity",
+            filename="Left_Velocity.png",
+            y_limit=Y_LIM_VEL,
+            y_label_text="Velocity [rad/s]"
+        )
 
         # ---------------------------------------------------------
-        # 2. 2D 側面軌跡プロット (Side View)
-        # ※ Y軸進行の場合、側面は Y-Z 平面になります
+        # 2D 側面軌跡プロット (Side View: X-Z)
         # ---------------------------------------------------------
-        print("[INFO] Generating 2D Side View plot (Y-Z plane)...")
+        print("[INFO] Generating 2D Side View plot (X-Z plane)...")
         fig_side, ax_side = plt.subplots(figsize=(14, 7)) 
         
-        ax_side.set_title(f"{title_prefix}, Side_View_Trajectory (Y-Z)")
+        # タイトル追加
+        ax_side.set_title(f"{title_prefix}, Side View Trajectory")
 
-        # Y軸とZ軸をプロット
-        ax_side.plot(traj_com[:, 1], traj_com[:, 2], 'k-', linewidth=3, label='CoM Height')
-        ax_side.plot(traj_l_foot[:, 1], traj_l_foot[:, 2], 'b--', linewidth=2.0, alpha=0.6, label='Left Ankle')
-        ax_side.plot(traj_r_foot[:, 1], traj_r_foot[:, 2], 'r--', linewidth=2.0, alpha=0.6, label='Right Ankle')
+        # 重心 (CoM) の軌跡
+        ax_side.plot(traj_com[:, 0], traj_com[:, 2], 'k-', linewidth=3, label='CoM Height')
+
+        # 足首の軌跡
+        ax_side.plot(traj_l_foot[:, 0], traj_l_foot[:, 2], 'b--', linewidth=2.0, alpha=0.6, label='Left Ankle')
+        ax_side.plot(traj_r_foot[:, 0], traj_r_foot[:, 2], 'r--', linewidth=2.0, alpha=0.6, label='Right Ankle')
         
+        # 地面 (Z=0) のラインを描画
         ax_side.axhline(y=0.0, color='gray', linestyle='-', linewidth=1.0, alpha=0.5)
 
-        ax_side.scatter(traj_com[0, 1], traj_com[0, 2], color='green', s=80, zorder=5, label='Start')
-        ax_side.scatter(traj_com[-1, 1], traj_com[-1, 2], color='magenta', s=80, zorder=5, label='End')
+        # スタートとゴール位置を点で表示
+        ax_side.scatter(traj_com[0, 0], traj_com[0, 2], color='green', s=80, zorder=5, label='Start')
+        ax_side.scatter(traj_com[-1, 0], traj_com[-1, 2], color='magenta', s=80, zorder=5, label='End')
         
-        ax_side.set_xlabel("Y Position (Distance) [m]")
+        ax_side.set_xlabel("X Position (Distance) [m]")
         ax_side.set_ylabel("Z Position (Height) [m]")
         
         ax_side.grid(True)
-        ax_side.legend()
+        ax_side.legend(loc='center')
         
         plt.tight_layout()
         plt.savefig(os.path.join(log_dir, "trajectory_side_view.png"))
         plt.close(fig_side)
 
         # ---------------------------------------------------------
-        # 3. 2D 足跡プロット
+        # 2D 足跡プロット (着地時のみ)
         # ---------------------------------------------------------
-        print("[INFO] Generating 2D Footprint plot...")
+        print("[INFO] Generating 2D Footprint plot (Stance Phase only)...")
         contact_threshold = 1.0 
         l_stance_idx = forces_l_arr > contact_threshold
         r_stance_idx = forces_r_arr > contact_threshold
         l_footprints = traj_l_foot[l_stance_idx]
         r_footprints = traj_r_foot[r_stance_idx]
         
-        fig2d, ax2d = plt.subplots(figsize=(8, 12)) 
-        ax2d.set_title(f"{title_prefix}, Footprint (Y-Axis)")
+        fig2d, ax2d = plt.subplots(figsize=(12, 8)) # Larger size
+        ax2d.set_title(f"{title_prefix}, Footprint")
 
         ax2d.plot(traj_com[:, 0], traj_com[:, 1], 'k-', linewidth=3.0, alpha=0.6, label='CoM Trajectory')
         if len(l_footprints) > 0:
@@ -712,54 +775,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if len(r_footprints) > 0:
             ax2d.scatter(r_footprints[:, 0], r_footprints[:, 1], c='red', s=20, alpha=0.5, label='Right')
             
-        # --- 修正箇所: スタート位置に合わせてプロット範囲とターゲットラインを自動調整 ---
-        # 実際のスタート位置を取得 (CoMの最初の位置)
-        if len(traj_com) > 0:
-            start_x_plot = traj_com[0, 0]
-            start_y_plot = traj_com[0, 1]
-        else:
-            start_x_plot = 0.0
-            start_y_plot = 0.0
-            
-        # ターゲットライン: スタート位置から Y軸方向に target_distance 分だけ伸ばす
-        # (target_distance変数が定義されていない場合の安全策として10.0mをデフォルトに使用)
-        dist_target = target_distance if 'target_distance' in locals() else 10.0
-        end_y_target = start_y_plot + dist_target
-        
-        # 理想ラインを描画 (Xはスタート位置固定、Yは進行方向)
-        ax2d.plot([start_x_plot, start_x_plot], [start_y_plot, end_y_target], 'g--', linewidth=2.0, label='Target Line')
+        # 理想ライン (0,0)-(10,0) を描画
+        ax2d.plot([0, 10], [0, 0], 'g--', linewidth=2.0, label='Target Line')
         
         ax2d.set_xlabel("X Position (m)")
         ax2d.set_ylabel("Y Position (m)")
-        ax2d.axis('equal') 
         
-        # 表示範囲 (xlim, ylim) を実際のスタート位置を中心に設定
-        ax2d.set_xlim(start_x_plot - 1.5, start_x_plot + 1.5) 
-        ax2d.set_ylim(start_y_plot - 1.0, end_y_target + 1.0)
+        ax2d.axis('equal') 
+        ax2d.set_ylim(-1.5, 1.5)
 
         ax2d.grid(True)
-        ax2d.legend(loc='upper right')
+        ax2d.legend(loc='upper left')
         plt.savefig(os.path.join(log_dir, "footprint_2d.png"))
         plt.close(fig2d)
         
         # ---------------------------------------------------------
-        # 4. 足裏反力 (Foot Forces) - 変更なし
+        # 足裏反力 (Foot Forces) のグラフ (面グラフ版)
         # ---------------------------------------------------------
-        print("[INFO] Generating Foot Force plot...")
-        fig_force, ax_force = plt.subplots(figsize=(14, 7))
-        ax_force.set_title(f"{title_prefix}, Foot_Forces")
+        print("[INFO] Generating Foot Force plot (Area Chart)...")
+        fig_force, ax_force = plt.subplots(figsize=(14, 7)) # Larger size
+        # タイトル追加
+        ax_force.set_title(f"{title_prefix}, Foot Forces")
 
+        # --- Left Foot (青・プラス側) ---
+        # 0から値までの領域を塗りつぶす (面グラフ化)
         ax_force.fill_between(time_axis, forces_l_arr, 0, color='blue', alpha=0.3)
+        # 境界線を描画
         ax_force.plot(time_axis, forces_l_arr, color='blue', linewidth=2.0, alpha=0.9, label='Left Foot Force')
 
+        # --- Right Foot (赤・マイナス側) ---
+        # 0からマイナス値までの領域を塗りつぶす (面グラフ化)
         ax_force.fill_between(time_axis, -forces_r_arr, 0, color='red', alpha=0.3)
+        # 境界線を描画
         ax_force.plot(time_axis, -forces_r_arr, color='red', linewidth=2.0, alpha=0.9, label='Right Foot Force')
 
         ax_force.set_xlabel("Time [s]")
         ax_force.set_ylabel("Contact Force [N]")
         
+        
+        # 静的（固定）な値でY軸の範囲を対称に設定
         y_static_limit = 1500.0 
         ax_force.set_ylim(-y_static_limit, y_static_limit)
+        
         ax_force.grid(True, linestyle='--', alpha=0.6)
         ax_force.legend(loc='upper right')
 
@@ -768,60 +825,82 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         plt.close(fig_force)
         
         # ---------------------------------------------------------
-        # 5. 歩幅解析 (Stride Length)
-        # ※ Y軸移動なので、Y座標の差分を使います
+        # 歩幅 (Stride Length) の解析グラフとCSV保存
         # ---------------------------------------------------------
-        print("[INFO] Calculating Stride Lengths (Y-Axis)...")
+        print("[INFO] Calculating Stride Lengths...")
 
-        def get_stride_lengths_y(forces, traj_foot, name="Foot"):
+        def get_stride_lengths(forces, traj_foot, name="Foot"):
+            # 接触判定の閾値 (N)
             threshold = 1.0 
+            # 接触状態 (True/False)
             is_contact = forces > threshold
+            
+            # 着地瞬間 (Swing -> Stance) のインデックスを検出
+            # diffが 1 になる箇所が立ち上がり（着地）
             contact_indices = np.where(np.diff(is_contact.astype(int)) == 1)[0]
             
             if len(contact_indices) < 2:
+                print(f"[WARNING] Not enough steps detected for {name}.")
                 return [], []
 
-            # 着地した瞬間のY座標を取得
-            step_y_positions = traj_foot[contact_indices, 1]
+            # 着地した瞬間のX座標を取得
+            step_x_positions = traj_foot[contact_indices, 0]
             
-            # Y座標の差分をとって歩幅を計算
-            strides = np.diff(step_y_positions)
-            return strides, step_y_positions
+            # 差分をとって歩幅 (Stride Length) を計算
+            # stride[i] = pos[i+1] - pos[i] (同じ足の連続する着地間距離)
+            strides = np.diff(step_x_positions)
+            
+            return strides, step_x_positions
 
-        l_strides, l_step_pos = get_stride_lengths_y(forces_l_arr, traj_l_foot, "Left")
-        r_strides, r_step_pos = get_stride_lengths_y(forces_r_arr, traj_r_foot, "Right")
+        # 左右それぞれの歩幅を計算
+        l_strides, l_step_pos = get_stride_lengths(forces_l_arr, traj_l_foot, "Left")
+        r_strides, r_step_pos = get_stride_lengths(forces_r_arr, traj_r_foot, "Right")
 
         if len(l_strides) > 0 and len(r_strides) > 0:
             fig_stride, ax_stride = plt.subplots(figsize=(10, 6))
-            ax_stride.set_title(f"{title_prefix}, Stride_Length (Y-Axis)")
+            # タイトル追加
+            ax_stride.set_title(f"{title_prefix}, Stride Length")
             
-            ax_stride.plot(np.arange(1, len(l_strides) + 1), l_strides, 'b-o', label='Left Stride', linewidth=2.5)
-            ax_stride.plot(np.arange(1, len(r_strides) + 1), r_strides, 'r-o', label='Right Stride', linewidth=2.5)
+            # グラフ描画 (横軸: 歩数, 縦軸: 歩幅[m])
+            # 1歩目, 2歩目... と数えられるように index + 1 しています
+            ax_stride.plot(np.arange(1, len(l_strides) + 1), l_strides, 'b-o', label='Left Stride (L->L)', linewidth=2.5)
+            ax_stride.plot(np.arange(1, len(r_strides) + 1), r_strides, 'r-o', label='Right Stride (R->R)', linewidth=2.5)
             
+            # 平均値のライン
             l_mean = np.mean(l_strides)
             r_mean = np.mean(r_strides)
-            ax_stride.axhline(y=l_mean, color='blue', linestyle='--', alpha=0.5, label=f'Left Mean: {l_mean:.3f}m')
-            ax_stride.axhline(y=r_mean, color='red', linestyle='--', alpha=0.5, label=f'Right Mean: {r_mean:.3f}m')
+            ax_stride.axhline(y=l_mean, color='blue', linestyle='--', alpha=0.5, label=f'Left Mean: {l_mean:.1f}m')
+            ax_stride.axhline(y=r_mean, color='red', linestyle='--', alpha=0.5, label=f'Right Mean: {r_mean:.1f}m')
 
             ax_stride.set_xlabel("Step Count")
             ax_stride.set_ylabel("Stride Length [m]")
+            
             ax_stride.grid(True)
             ax_stride.legend(loc='lower right') 
+
             plt.tight_layout()
             plt.savefig(os.path.join(log_dir, "stride_length_analysis.png"))
             plt.close(fig_stride)
+            print(f"[INFO] Stride analysis saved. Avg L: {l_mean:.1f}m, Avg R: {r_mean:.1f}m")
             
+            # 歩幅データのCSV保存
             with open(os.path.join(log_dir, "data_strides.csv"), "w", newline="") as f_stride:
                 w_stride = csv.writer(f_stride)
                 w_stride.writerow(["Step_Index", "Left_Stride_m", "Right_Stride_m"])
+                
+                # 左右の歩数が異なる場合を考慮して保存
                 max_len = max(len(l_strides), len(r_strides))
                 for i in range(max_len):
                     val_l = l_strides[i] if i < len(l_strides) else ""
                     val_r = r_strides[i] if i < len(r_strides) else ""
                     w_stride.writerow([i+1, val_l, val_r])
+            print(f"[INFO] Stride CSV saved to: {os.path.join(log_dir, 'data_strides.csv')}")
+
+        else:
+            print("[WARNING] Could not generate stride graph (steps < 2).")
 
         # ---------------------------------------------------------
-        # 6. 安定性解析 (Roll & Pitch) - 変更なし
+        # 姿勢偏差 (Stability Analysis: Roll & Pitch)
         # ---------------------------------------------------------
         if len(traj_roll) > 0:
             print("[INFO] Generating Stability Analysis plot...")
@@ -833,14 +912,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             
             fig_stab, ax_stab = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
             
+            # Roll
             ax_stab[0].plot(time_axis, traj_roll_arr, 'b', label='Roll (L/R)')
-            ax_stab[0].set_title(f"{title_prefix}, Roll Stability (Std: {roll_std:.4f} deg)")
+            ax_stab[0].set_title(f"{title_prefix}, Roll Stability (Std: {roll_std:.1f} deg)")
             ax_stab[0].set_ylabel("Roll [deg]")
             ax_stab[0].grid(True)
             ax_stab[0].legend()
             
+            # Pitch
             ax_stab[1].plot(time_axis, traj_pitch_arr, 'r', label='Pitch (F/B)')
-            ax_stab[1].set_title(f"{title_prefix}, Pitch Stability (Std: {pitch_std:.4f} deg)")
+            ax_stab[1].set_title(f"{title_prefix}, Pitch Stability (Std: {pitch_std:.1f} deg)")
             ax_stab[1].set_ylabel("Pitch [deg]")
             ax_stab[1].set_xlabel("Time [s]")
             ax_stab[1].grid(True)
@@ -849,6 +930,176 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             plt.tight_layout()
             plt.savefig(os.path.join(log_dir, "stability_analysis.png"))
             plt.close(fig_stab)
+            print(f"[INFO] Saved graph: stability_analysis.png")
+
+        # =========================================================
+        # [追加機能] 1歩行周期 (Gait Cycle) の抽出とプロット
+        # =========================================================
+        print("[INFO] Generating Single Gait Cycle plots...")
+        
+        def extract_gait_cycle(forces_l, forces_r):
+            """
+            左足の接地(Heel Strike)から次の接地までを1周期としてインデックスを返す
+            安定したデータを取るため、データの真ん中付近のサイクルを採用する
+            """
+            threshold = 1.0
+            # 接触状態 (True/False)
+            is_contact = forces_l > threshold
+            
+            # 立ち上がりエッジ検出 (Swing -> Stance)
+            # diffが1になるインデックスが「接地開始」
+            contact_starts = np.where(np.diff(is_contact.astype(int)) == 1)[0]
+            
+            if len(contact_starts) < 3:
+                print("[WARNING] Not enough steps to extract a stable gait cycle.")
+                return None, None
+            
+            # データの真ん中付近にあるステップを採用する
+            target_step_idx = len(contact_starts) // 2
+            
+            start_idx = contact_starts[target_step_idx]
+            end_idx = contact_starts[target_step_idx + 1]
+            
+            return start_idx, end_idx
+
+        # 1周期のインデックスを取得
+        idx_start, idx_end = extract_gait_cycle(forces_l_arr, forces_r_arr)
+
+        if idx_start is not None and idx_end is not None:
+            cycle_len = idx_end - idx_start
+            print(f"[INFO] Extracted Gait Cycle: Step {idx_start} to {idx_end} ({cycle_len} frames)")
+
+            # =========================================================
+            # [追加機能] Hip_Pitch, Knee, Ankle_Pitch の統計グラフ
+            # =========================================================
+            print("[INFO] Generating Cycle Statistics (Mean+Std with ErrorBar) for selected joints...")
+            
+            def plot_cycle_stats_errorbar(start, end, joint_names, torques_full, vels_full):
+                # 対象とする関節のキーワード
+                target_subs = ["hip_pitch", "knee", "ankle_pitch"]
+                
+                selected_indices = []
+                selected_labels = []
+
+                # キーワードに一致する関節を検索
+                for i, name in enumerate(joint_names):
+                    if any(sub in name for sub in target_subs):
+                        selected_indices.append(i)
+                        # ラベルを短縮化 (例: left_hip_pitch_joint -> L_Hip_P)
+                        short = name.replace("left_", "L_").replace("right_", "R_").replace("_joint", "")
+                        short = short.replace("hip_pitch", "Hip_P").replace("ankle_pitch", "Ank_P")
+                        selected_labels.append(short)
+
+                if not selected_indices:
+                    print("[WARNING] No target joints found for statistics.")
+                    return
+
+                # 該当周期のデータを切り出し
+                cycle_torques = torques_full[start:end, selected_indices]
+                cycle_vels = vels_full[start:end, selected_indices]
+
+                # 統計量の計算 (絶対値を使用)
+                # Max: ピーク負荷 (Scatterで表示)
+                # Mean: 平均負荷 (Barで表示)
+                # Std: ばらつき (Error Barで表示)
+                
+                t_max = np.max(np.abs(cycle_torques), axis=0)
+                t_mean = np.mean(np.abs(cycle_torques), axis=0)
+                t_std = np.std(np.abs(cycle_torques), axis=0)
+
+                v_max = np.max(np.abs(cycle_vels), axis=0)
+                v_mean = np.mean(np.abs(cycle_vels), axis=0)
+                v_std = np.std(np.abs(cycle_vels), axis=0)
+
+                # --- [追加] CSVファイルの保存 (絶対値データ) ---
+                # CycleStats_Torques.csv
+                torque_csv_path = os.path.join(log_dir, "CycleStats_Torques.csv")
+                try:
+                    with open(torque_csv_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Joint_Name", "Max_Abs_Torque_Nm", "Mean_Abs_Torque_Nm", "Std_Abs_Torque_Nm"])
+                        for i, label in enumerate(selected_labels):
+                            writer.writerow([label, t_max[i], t_mean[i], t_std[i]])
+                    print(f"[INFO] Saved torque stats CSV (Absolute values): {torque_csv_path}")
+                except IOError as e:
+                    print(f"[ERROR] Could not save torque stats CSV: {e}")
+
+                # CycleStats_Velocities.csv
+                vel_csv_path = os.path.join(log_dir, "CycleStats_Velocities.csv")
+                try:
+                    with open(vel_csv_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Joint_Name", "Max_Abs_Vel_rad_s", "Mean_Abs_Vel_rad_s", "Std_Abs_Vel_rad_s"])
+                        for i, label in enumerate(selected_labels):
+                            writer.writerow([label, v_max[i], v_mean[i], v_std[i]])
+                    print(f"[INFO] Saved velocity stats CSV (Absolute values): {vel_csv_path}")
+                except IOError as e:
+                    print(f"[ERROR] Could not save velocity stats CSV: {e}")
+                # -----------------------------------------------
+
+                # --- グラフ描画関数 (エラーバー付き) ---
+                def create_errorbar_plot(labels, max_vals, mean_vals, std_vals, y_label, title_s, filename):
+                    x = np.arange(len(labels))
+                    
+                    # ------------------------------------------------------------------
+                    # [修正箇所] 下側のエラーバーが0を下回らないように計算
+                    # ------------------------------------------------------------------
+                    # mean_vals - lower_error >= 0 になるようにする
+                    # つまり lower_error は std_vals と mean_vals の小さい方を取ればよい
+                    lower_error = np.minimum(mean_vals, std_vals)
+                    
+                    # asymmetric_error = [lower, upper]
+                    asymmetric_error = [lower_error, std_vals]
+                    
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    
+                    # Bar Plot (Mean) with Asymmetric Error Bar
+                    bars = ax.bar(x, mean_vals, yerr=asymmetric_error, align='center', alpha=0.7, 
+                                  ecolor='black', capsize=10, label='Mean ± Std', color='#56B4E9',
+                                  error_kw={'elinewidth': 3.0, 'capthick': 3.0}) # エラーバーを太く
+
+                    # Max Value (Scatter overlay) - 赤い点または×印でピークを表示
+                    # s: マーカーサイズ, linewidths: 線の太さ
+                    ax.scatter(x, max_vals, color='red', marker='x', s=200, linewidths=4.0, zorder=5, label='Max (Peak)')
+
+                    ax.set_ylabel(y_label)
+                    ax.set_title(title_s)
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(labels, rotation=45, ha="right")
+                    ax.legend()
+                    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+                    # 値をバーの上に表示 (Mean) - フォントを大きく太く
+                    for rect in bars:
+                        height = rect.get_height()
+                        ax.annotate(f'{height:.1f}',
+                                    xy=(rect.get_x() + rect.get_width() / 2, height),
+                                    xytext=(5, 5),  # 位置調整
+                                    textcoords="offset points",
+                                    ha='left', va='bottom', fontsize=14, fontweight='bold', color='blue')
+
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(log_dir, filename))
+                    plt.close(fig)
+                    print(f"[INFO] Saved stat plot: {filename}")
+
+                # トルクの統計グラフ
+                create_errorbar_plot(
+                    selected_labels, t_max, t_mean, t_std, 
+                    "Torque [Nm]", f"{title_prefix} - Joint Torque per Gait Cycle", "CycleStats_Torques.png"
+                )
+
+                # 速度の統計グラフ
+                create_errorbar_plot(
+                    selected_labels, v_max, v_mean, v_std, 
+                    "Velocity [rad/s]", f"{title_prefix} - Joint Velocity per Gait Cycle", "CycleStats_Velocities.png"
+                )
+
+            # 統計プロット実行
+            plot_cycle_stats_errorbar(idx_start, idx_end, target_joint_names, joint_torques_arr, joint_vels_arr)
+
+        else:
+            print("[WARNING] Could not extract a valid gait cycle (maybe not enough steps recorded).")
         
     else:
         print("[WARNING] No data collected.")
